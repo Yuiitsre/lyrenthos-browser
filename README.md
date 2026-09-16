@@ -1,88 +1,131 @@
 # Lyrenthos Browser
 
-A browser-in-browser web gateway designed around a simple performance rule: **let the user's browser render the website whenever possible; do not turn ordinary web pages into remote-desktop video.**
+Lyrenthos is a browser-style web workspace built to keep the user's browser doing the rendering. The Appwrite project is the entire managed platform: Site for the UI, Functions for the gateway, and Storage for durable session state.
 
-## Architecture
+## Appwrite-only architecture
 
 ```text
 User browser
-   |
-   v
-React + Vite browser UI (Appwrite Sites)
-   |
-   v
-Go gateway (Heroku/container)
-   |
-   +-- streaming HTTP/HTTPS
-   +-- per-session cookie jar
-   +-- redirects + HTML URL rewriting
-   +-- connection pooling / HTTP/2
-   +-- DNS/SSRF protections
-   |
-   +-- optional future Chromium/Playwright fallback
+    |
+    v
+Appwrite Site (Lyrenthos UI)
+    |
+    v
+Appwrite Function: lyrenthos-gateway
+    |
+    +-- fast HTTP/HTTPS fetch
+    +-- per-session cookie jar
+    +-- redirects + HTML/CSS URL rewriting
+    +-- GET/HEAD/POST/PUT/PATCH/DELETE forwarding
+    +-- SSRF/private-address protections
+    |
+    v
+Target website
+
+Appwrite Storage
+    |
+    +-- encrypted-at-rest session state
+    +-- one session file per browser workspace
 ```
 
-Appwrite is the control plane. The Go service is the network data plane. The user's browser remains responsible for rendering the returned HTML/CSS/JS rather than receiving a remote desktop video stream.
+No Heroku, VPS, Redis, or external gateway is required for this architecture.
 
-## Current release
+## What the browser is
 
-The current gateway supports safe GET/HEAD proxying, streaming non-HTML bodies, redirect rewriting, HTML resource/link rewriting, isolated in-memory cookie jars, connection reuse, request/response limits, and SSRF protections. It intentionally does not defeat DRM, CAPTCHA, authentication controls, frame policies, or other access controls.
+The Lyrenthos Site is the browser chrome: tabs, address bar, navigation history, reload, home, and the web viewport. It does not ask the user to create a separate Lyrenthos account just to browse.
 
-Modern sites may still require additional protocol handling such as POST/form forwarding, WebSockets, service workers, complex cross-origin APIs, or browser-only execution. Those are planned adapters rather than pretending a simple HTTP proxy is a universal browser.
+The target site is loaded through the Appwrite Function domain and rendered by the user's local browser. The function handles the network path and stores the target site's cookies in Appwrite Storage so the same Lyrenthos workspace can reuse that state later.
 
-## Appwrite Sites
+## Appwrite Function
 
-Appwrite Sites can host this frontend and automatically provides a generated HTTPS Site URL, so attaching `lyrenthos.tech` is optional. The repository is configured for:
-
-- Repository: `Yuiitsre/lyrenthos-browser`
-- Production branch: `main`
-- Site ID: `lyrenthos-browser`
-- Path: `apps/web`
-- Install: `npm install`
-- Build: `npm run build`
-- Output: `dist`
-- Build runtime: `node-22`
-- Adapter: `static`
-
-Public Vite variables:
+Function ID:
 
 ```text
-VITE_APPWRITE_ENDPOINT=https://<REGION>.cloud.appwrite.io/v1
-VITE_APPWRITE_PROJECT_ID=<PROJECT_ID>
-VITE_GATEWAY_URL=https://<HEROKU_GATEWAY>.herokuapp.com
+lyrenthos-gateway
 ```
 
-## One-command Windows deployment
+Runtime:
 
-The repository contains `scripts/bootstrap.ps1`. It can clone/update the repo, install the frontend, build it, configure the current Appwrite project through the CLI, create the Site if missing, create/deploy the gateway on Heroku, set the public frontend variables, push the Appwrite Site, print the launch URLs, and open the Site.
-
-Run in PowerShell:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass; irm https://raw.githubusercontent.com/Yuiitsre/lyrenthos-browser/main/scripts/bootstrap.ps1 | iex
+```text
+node-22
 ```
 
-The script asks for your Appwrite project ID, regional project endpoint, and an Appwrite API key with `sites.write`. The key is used only locally during deployment and is not written to the repository or frontend bundle.
+Entrypoint:
+
+```text
+index.js
+```
+
+Root directory:
+
+```text
+functions/lyrenthos-gateway
+```
+
+Build command:
+
+```text
+npm install
+```
+
+Execute access:
+
+```text
+Any
+```
+
+The function needs these dynamic-key scopes:
+
+```text
+buckets.read
+buckets.write
+files.read
+files.write
+```
+
+On the first request it creates the private encrypted Appwrite Storage bucket `lyrenthos-browser-sessions` when it is missing. Session files are keyed by a high-entropy browser workspace ID and contain only the target-site cookie jar and update timestamp.
+
+## Site deployment
+
+Appwrite Site configuration:
+
+```text
+Framework: Vite
+Root directory: ./
+Install: npm install
+Build: npm run build
+Output: dist
+Fallback: index.html
+```
+
+Set the Site environment variable after the Function has a generated domain:
+
+```text
+VITE_GATEWAY_URL=https://<function-id>.<region>.appwrite.run
+```
+
+Appwrite Functions provide generated HTTPS domains and can be deployed directly from Git. Commits to the configured production branch can automatically build and activate new deployments. Appwrite documents a 30-second hard limit for synchronous function executions and a configurable function timeout up to 15 minutes, so this Appwrite-only version is designed around short HTTP requests rather than an always-open remote desktop stream.
+
+## Session model
+
+The browser creates a random workspace ID and keeps it in local storage. Every gateway navigation carries that ID to the Function. The Function reads the corresponding session file from Appwrite Storage, applies matching cookies to the upstream request, captures new `Set-Cookie` headers, and saves the updated jar back to Storage.
+
+The session identifier is a bearer-style workspace token; do not share it publicly. A later production hardening step can bind sessions to Appwrite user identities or device authorization without changing the network architecture.
 
 ## Development
 
 Frontend:
 
 ```bash
-cd apps/web
 npm install
 npm run dev
 ```
 
-Gateway:
+Function:
 
 ```bash
-cd services/gateway
-go run .
+cd functions/lyrenthos-gateway
+npm install
 ```
 
-The gateway can be deployed to Heroku by making `services/gateway` the Heroku application root (the bootstrap script uses `git subtree push` for this).
-
-## Session model
-
-The gateway uses an isolated in-memory cookie jar per Lyrenthos session. This is useful for the prototype, but sessions do not survive a Heroku dyno restart. Before a paid production service, replace the in-memory store with an encrypted, durable session store and bind sessions to authenticated Appwrite users.
+Appwrite supports Git-connected Function deployments and automatic activation from the production branch. See the official Appwrite Functions deployment documentation for configuring the repository, root directory, entrypoint, runtime, permissions, and build commands.
