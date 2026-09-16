@@ -8,30 +8,18 @@ function Need-Command([string]$Name) {
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-function Ensure-WingetPackage([string]$Id, [string]$Command) {
-  if (Need-Command $Command) { return }
-  if (-not (Need-Command 'winget')) {
-    throw "'$Command' is missing and winget is not available. Install it, then rerun this script."
-  }
-  Write-Host "Installing $Command..." -ForegroundColor Cyan
-  winget install --id $Id --exact --accept-source-agreements --accept-package-agreements
+function Stop-Missing([string]$Name, [string]$InstallHint) {
+  if (-not (Need-Command $Name)) { throw "$Name is required. $InstallHint" }
 }
 
 Write-Host "== Lyrenthos Browser bootstrap ==" -ForegroundColor Green
-
-Ensure-WingetPackage 'Git.Git' 'git'
-Ensure-WingetPackage 'OpenJS.NodeJS.LTS' 'node'
-Ensure-WingetPackage 'GoLang.Go' 'go'
-
-if (-not (Need-Command 'heroku')) {
-  if (Need-Command 'winget') {
-    Write-Host 'Installing Heroku CLI...' -ForegroundColor Cyan
-    winget install --id Heroku.HerokuCLI --exact --accept-source-agreements --accept-package-agreements
-  }
-}
+Stop-Missing 'git' 'Install Git for Windows, then rerun this script.'
+Stop-Missing 'node' 'Install Node.js LTS, then rerun this script.'
+Stop-Missing 'npm' 'Install Node.js LTS, then rerun this script.'
+Stop-Missing 'heroku' 'Install the Heroku CLI, run heroku login, then rerun this script.'
 
 if (-not (Need-Command 'appwrite')) {
-  Write-Host 'Installing Appwrite CLI...' -ForegroundColor Cyan
+  Write-Host 'Installing latest Appwrite CLI...' -ForegroundColor Cyan
   npm install -g appwrite-cli
 }
 
@@ -45,23 +33,22 @@ if (-not (Test-Path $Root)) {
 }
 Set-Location $Root
 
-Write-Host 'Installing frontend dependencies...' -ForegroundColor Cyan
+Write-Host 'Installing and building the frontend...' -ForegroundColor Cyan
 Set-Location (Join-Path $Root 'apps/web')
 npm install
 npm run build
 Set-Location $Root
 
-$ProjectId = Read-Host 'Enter your Appwrite PROJECT ID'
-$Endpoint = Read-Host 'Enter your Appwrite project endpoint (example: https://fra.cloud.appwrite.io/v1)'
-$ApiKeySecure = Read-Host 'Enter an Appwrite API key with sites.write scope' -AsSecureString
+$ProjectId = Read-Host 'Appwrite PROJECT ID'
+$Endpoint = Read-Host 'Appwrite project endpoint (example: https://fra.cloud.appwrite.io/v1)'
+$ApiKeySecure = Read-Host 'Appwrite API key (must have sites.write)' -AsSecureString
 $ApiKeyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ApiKeySecure)
 $ApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ApiKeyPtr)
 [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ApiKeyPtr)
 
-Write-Host 'Configuring Appwrite CLI in non-interactive mode...' -ForegroundColor Cyan
+Write-Host 'Configuring Appwrite CLI...' -ForegroundColor Cyan
 appwrite client --endpoint $Endpoint --project-id $ProjectId --key $ApiKey
 
-# Keep a CLI-friendly local config. Secrets are never committed.
 $Config = @'
 {
   "version": 1,
@@ -69,9 +56,9 @@ $Config = @'
     {
       "$id": "lyrenthos-browser",
       "name": "Lyrenthos Browser",
-      "framework": "vite",
       "enabled": true,
       "logging": true,
+      "framework": "vite",
       "timeout": 30,
       "installCommand": "npm install",
       "buildCommand": "npm run build",
@@ -79,30 +66,30 @@ $Config = @'
       "buildRuntime": "node-22",
       "adapter": "static",
       "fallbackFile": "index.html",
-      "path": "apps/web"
+      "path": "apps/web",
+      "deploymentRetention": 7
     }
   ]
 }
 '@
 Set-Content -Path (Join-Path $Root 'appwrite.config.json') -Value $Config -Encoding utf8
 
-# Create the Appwrite Site if it does not already exist.
+# Create the Site when it does not already exist.
 $Headers = @{
   'X-Appwrite-Project' = $ProjectId
   'X-Appwrite-Key' = $ApiKey
   'Content-Type' = 'application/json'
 }
-$Site = $null
 try {
-  $Site = Invoke-RestMethod -Uri ($Endpoint.TrimEnd('/') + '/sites/' + $SiteId) -Headers $Headers -Method Get
+  Invoke-RestMethod -Uri ($Endpoint.TrimEnd('/') + '/sites/' + $SiteId) -Headers $Headers -Method Get | Out-Null
   Write-Host "Appwrite Site '$SiteId' already exists." -ForegroundColor Yellow
 } catch {
-  $Body = @{
+  $CreateBody = @{
     siteId = $SiteId
     name = 'Lyrenthos Browser'
-    framework = 'vite'
     enabled = $true
     logging = $true
+    framework = 'vite'
     timeout = 30
     installCommand = 'npm install'
     buildCommand = 'npm run build'
@@ -112,70 +99,55 @@ try {
     fallbackFile = 'index.html'
     deploymentRetention = 7
   } | ConvertTo-Json -Depth 5
+
   Write-Host 'Creating Appwrite Site...' -ForegroundColor Cyan
-  $Site = Invoke-RestMethod -Uri ($Endpoint.TrimEnd('/') + '/sites') -Headers $Headers -Method Post -Body $Body
+  Invoke-RestMethod -Uri ($Endpoint.TrimEnd('/') + '/sites') -Headers $Headers -Method Post -Body $CreateBody | Out-Null
 }
 
-# Deploy the gateway to Heroku if the CLI is available.
-$GatewayUrl = ''
-if (Need-Command 'heroku') {
-  heroku whoami | Out-Null
-  if ($LASTEXITCODE -eq 0) {
-    $HerokuApp = Read-Host 'Heroku app name (press Enter for auto-generated)'
-    if ([string]::IsNullOrWhiteSpace($HerokuApp)) {
-      $HerokuApp = (& heroku create | Select-Object -First 1).Split(' ')[0]
-    } else {
-      $existing = (& heroku apps:info -a $HerokuApp 2>$null | Out-String)
-      if (-not $existing) { heroku create $HerokuApp | Out-Null }
-    }
+Write-Host 'Checking Heroku login...' -ForegroundColor Cyan
+heroku whoami | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Run heroku login, then rerun this script.' }
 
-    Write-Host "Deploying gateway from services/gateway to Heroku app $HerokuApp..." -ForegroundColor Cyan
-    heroku config:set WEB_ORIGIN='*' LISTEN_ADDR=':8080' -a $HerokuApp | Out-Null
-    git remote remove heroku 2>$null
-    heroku git:remote -a $HerokuApp | Out-Null
-    git subtree push --prefix services/gateway heroku main
-    $GatewayUrl = (& heroku info -a $HerokuApp -s | Select-String '^web_url=').ToString().Split('=')[1].Trim()
-  } else {
-    Write-Host 'Heroku CLI is installed but not logged in. Skipping gateway deployment.' -ForegroundColor Yellow
-  }
+$HerokuApp = Read-Host 'Heroku gateway app name (Enter for auto-generated)'
+if ([string]::IsNullOrWhiteSpace($HerokuApp)) {
+  $Created = heroku create
+  $HerokuApp = [regex]::Match(($Created -join "`n"), 'https://([a-z0-9-]+)\.herokuapp\.com').Groups[1].Value
+  if ([string]::IsNullOrWhiteSpace($HerokuApp)) { throw 'Could not determine the created Heroku app name.' }
 } else {
-  Write-Host 'Heroku CLI unavailable. The Appwrite frontend will still be deployed, but gateway features remain offline.' -ForegroundColor Yellow
+  & heroku apps:info -a $HerokuApp 2>$null | Out-Null
+  if ($LASTEXITCODE -ne 0) { heroku create $HerokuApp | Out-Null }
 }
 
-if ([string]::IsNullOrWhiteSpace($GatewayUrl)) {
-  $GatewayUrl = Read-Host 'Gateway URL (press Enter to leave it blank for now)'
-}
+Write-Host "Deploying gateway to Heroku app '$HerokuApp'..." -ForegroundColor Cyan
+heroku config:set WEB_ORIGIN='*' LISTEN_ADDR=':8080' -a $HerokuApp | Out-Null
+heroku git:remote -a $HerokuApp | Out-Null
+# Deploy only services/gateway as the Heroku application root.
+git subtree push --prefix services/gateway heroku main
 
-# Vite public variables are safe to place in the Site environment. Do NOT put Appwrite API keys here.
-$EnvPath = Join-Path $Root 'apps/web/.env'
-@
-"VITE_APPWRITE_ENDPOINT=$Endpoint"
-"VITE_APPWRITE_PROJECT_ID=$ProjectId"
-"VITE_GATEWAY_URL=$GatewayUrl"
-@ | Set-Content -Path $EnvPath -Encoding utf8
+$GatewayInfo = heroku apps:info -a $HerokuApp -s
+$GatewayUrl = ($GatewayInfo | Select-String '^web_url=').ToString().Split('=')[1].Trim()
 
-Write-Host 'Building and pushing the Appwrite Site...' -ForegroundColor Cyan
+# Vite public variables are local and ignored by git; never put the Appwrite API key here.
+$EnvContent = @"
+VITE_APPWRITE_ENDPOINT=$Endpoint
+VITE_APPWRITE_PROJECT_ID=$ProjectId
+VITE_GATEWAY_URL=$GatewayUrl
+"@
+Set-Content -Path (Join-Path $Root 'apps/web/.env') -Value $EnvContent -Encoding utf8
+
+Write-Host 'Deploying the frontend to Appwrite Sites...' -ForegroundColor Cyan
 appwrite push sites --site-id $SiteId --with-variables --force
 
-try {
-  $Live = appwrite sites get --site-id $SiteId --json | ConvertFrom-Json
-  if ($Live.domain) {
-    $SiteUrl = $Live.domain
-  } elseif ($Live.url) {
-    $SiteUrl = $Live.url
-  } else {
-    $SiteUrl = "https://$SiteId.appwrite.network"
-  }
-} catch {
-  $SiteUrl = "https://$SiteId.appwrite.network"
-}
+$SiteInfo = appwrite sites get --site-id $SiteId --json | ConvertFrom-Json
+$SiteUrl = $SiteInfo.domain
+if ([string]::IsNullOrWhiteSpace($SiteUrl)) { $SiteUrl = $SiteInfo.url }
+if ([string]::IsNullOrWhiteSpace($SiteUrl)) { $SiteUrl = "https://$SiteId.appwrite.network" }
 
 Write-Host ''
 Write-Host '=============================================' -ForegroundColor Green
-Write-Host 'Lyrenthos Browser deployment finished.' -ForegroundColor Green
-Write-Host "Repository: $RepoUrl"
-Write-Host "Appwrite Site ID: $SiteId"
-Write-Host "Launch URL: $SiteUrl" -ForegroundColor Cyan
-if ($GatewayUrl) { Write-Host "Gateway URL: $GatewayUrl" -ForegroundColor Cyan }
+Write-Host 'LYRENTHOS BROWSER DEPLOYMENT COMPLETE' -ForegroundColor Green
+Write-Host "Appwrite Site : $SiteUrl" -ForegroundColor Cyan
+Write-Host "Gateway       : $GatewayUrl" -ForegroundColor Cyan
+Write-Host "Repository    : $RepoUrl" -ForegroundColor Cyan
 Write-Host '=============================================' -ForegroundColor Green
-Write-Host 'Open the Launch URL in your browser.'
+Start-Process $SiteUrl
