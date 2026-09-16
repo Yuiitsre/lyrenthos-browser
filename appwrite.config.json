@@ -14,7 +14,30 @@
       "buildRuntime": "node-22",
       "adapter": "static",
       "fallbackFile": "index.html",
-      "path": "apps/web",
+      "path": ".",
+      "deploymentRetention": 7
+    }
+  ],
+  "functions": [
+    {
+      "$id": "lyrenthos-gateway",
+      "name": "Lyrenthos Gateway",
+      "enabled": true,
+      "logging": true,
+      "runtime": "node-22",
+      "entrypoint": "index.js",
+      "commands": "npm install",
+      "execute": ["any"],
+      "events": [],
+      "schedule": "",
+      "timeout": 30,
+      "path": "functions/lyrenthos-gateway",
+      "scopes": [
+        "buckets.read",
+        "buckets.write",
+        "files.read",
+        "files.write"
+      ],
       "deploymentRetention": 7
     }
   ]
