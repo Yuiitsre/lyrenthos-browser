@@ -10,11 +10,24 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36';
 
 function getStorage(req) {
+  const key = req.headers['x-appwrite-key'] || process.env.APPWRITE_FUNCTION_API_KEY;
+  if (!key) throw new Error('Appwrite dynamic API key unavailable');
   const client = new Client()
     .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
     .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
-    .setKey(req.headers['x-appwrite-key']);
+    .setKey(key);
   return new Storage(client);
+}
+
+function corsHeaders(req) {
+  const origin = req.headers?.origin;
+  return {
+    'Access-Control-Allow-Origin': origin || '*',
+    'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept, User-Agent, Accept-Language, X-Requested-With',
+    'Access-Control-Max-Age': '86400',
+    ...(origin ? { Vary: 'Origin' } : {}),
+  };
 }
 
 function responseHeaders(source) {
@@ -23,7 +36,9 @@ function responseHeaders(source) {
     'connection', 'keep-alive', 'transfer-encoding', 'content-length',
     'set-cookie', 'content-encoding', 'content-security-policy',
     'content-security-policy-report-only', 'cross-origin-embedder-policy',
-    'cross-origin-opener-policy', 'cross-origin-resource-policy'
+    'cross-origin-opener-policy', 'cross-origin-resource-policy',
+    'access-control-allow-origin', 'access-control-allow-credentials',
+    'access-control-allow-headers', 'access-control-allow-methods',
   ]);
   for (const [key, value] of source.entries()) {
     if (!blocked.has(key.toLowerCase())) out[key] = value;
@@ -34,11 +49,9 @@ function responseHeaders(source) {
 function sessionFileId(sid) {
   return `s_${crypto.createHash('sha256').update(sid).digest('hex').slice(0, 30)}`;
 }
-
 function newSessionId() {
   return crypto.randomBytes(24).toString('base64url');
 }
-
 function safeString(value, max) {
   return typeof value === 'string' && value.length <= max ? value : '';
 }
@@ -102,7 +115,6 @@ function parseSetCookie(line, requestUrl) {
   if (!cookie.name || cookie.name.length > 180 || cookie.value.length > 4096) return null;
   return cookie;
 }
-
 function domainMatches(host, cookie) {
   const domain = cookie.domain.toLowerCase();
   const h = host.toLowerCase();
@@ -201,6 +213,7 @@ function rewriteHtml(html, functionOrigin, sid, base) {
     return `srcset=${q}${items.join(', ')}${q}`;
   });
   out = out.replace(/\bstyle=(['"])(.*?)\1/gi, (m, q, value) => `style=${q}${rewriteCss(value, functionOrigin, sid, base)}${q}`);
+  out = out.replace(/<head([^>]*)>/i, `<head$1><meta name="referrer" content="no-referrer">`);
   return out;
 }
 
@@ -237,15 +250,22 @@ async function fetchThrough(url, method, headers, body, cookies) {
 }
 
 export default async ({ req, res, error }) => {
+  const baseCors = corsHeaders(req);
   try {
-    if (req.query.health === '1') return res.json({ ok: true, service: 'lyrenthos-appwrite-gateway' });
+    if (req.method === 'OPTIONS') return res.empty(204, baseCors);
+    if (req.query.health === '1') {
+      return res.json({ ok: true, service: 'lyrenthos-appwrite-gateway' }, 200, baseCors);
+    }
+
     const targetRaw = safeString(req.query.url, 8192);
-    if (!targetRaw) return res.json({ ok: true, message: 'Lyrenthos gateway', usage: '?url=https://example.com&sid=<session>' });
+    if (!targetRaw) {
+      return res.json({ ok: true, message: 'Lyrenthos gateway', usage: '?url=https://example.com&sid=<session>' }, 200, baseCors);
+    }
     const target = validateTarget(targetRaw);
-    if (!target) return res.json({ ok: false, error: 'Only http(s) URLs are supported.' }, 400);
+    if (!target) return res.json({ ok: false, error: 'Only http(s) URLs are supported.' }, 400, baseCors);
     const sid = safeString(req.query.sid, 128) || newSessionId();
-    if (!/^[A-Za-z0-9_-]{24,128}$/.test(sid)) return res.json({ ok: false, error: 'Invalid session.' }, 400);
-    if (req.bodyText && req.bodyText.length > MAX_REQUEST) return res.json({ ok: false, error: 'Request body too large.' }, 413);
+    if (!/^[A-Za-z0-9_-]{24,128}$/.test(sid)) return res.json({ ok: false, error: 'Invalid session.' }, 400, baseCors);
+    if ((req.bodyText || '').length > MAX_REQUEST) return res.json({ ok: false, error: 'Request body too large.' }, 413, baseCors);
 
     const storage = getStorage(req);
     await ensureBucket(storage);
@@ -262,9 +282,9 @@ export default async ({ req, res, error }) => {
     const functionOrigin = `${req.scheme || 'https'}://${req.host}`;
     const headers = {
       ...responseHeaders(response.headers),
+      ...baseCors,
       'Cache-Control': contentType.includes('text/html') ? 'no-store' : 'public, max-age=60',
       'X-Lyrenthos-Session': sid,
-      'Vary': 'Accept-Encoding',
     };
     const location = response.headers.get('location');
     if (location) headers.Location = proxiedUrl(functionOrigin, sid, new URL(location, result.url).toString());
@@ -272,21 +292,21 @@ export default async ({ req, res, error }) => {
     if (req.method === 'HEAD') return res.empty(response.status, headers);
     if (contentType.includes('text/html')) {
       const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > MAX_HTML) return res.json({ ok: false, error: 'HTML response too large for this Appwrite-only gateway.' }, 502);
+      if (bytes.length > MAX_HTML) return res.json({ ok: false, error: 'HTML response too large for this Appwrite-only gateway.' }, 502, baseCors);
       const text = rewriteHtml(bytes.toString('utf8'), functionOrigin, sid, result.url);
       return res.text(text, response.status, { ...headers, 'Content-Type': 'text/html; charset=utf-8' });
     }
     if (contentType.includes('text/css')) {
       const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > MAX_HTML) return res.json({ ok: false, error: 'CSS response too large.' }, 502);
+      if (bytes.length > MAX_HTML) return res.json({ ok: false, error: 'CSS response too large.' }, 502, baseCors);
       const text = rewriteCss(bytes.toString('utf8'), functionOrigin, sid, result.url);
       return res.text(text, response.status, { ...headers, 'Content-Type': 'text/css; charset=utf-8' });
     }
     const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > MAX_BODY) return res.json({ ok: false, error: 'Response too large for this Appwrite-only gateway.' }, 502);
+    if (bytes.length > MAX_BODY) return res.json({ ok: false, error: 'Response too large for this Appwrite-only gateway.' }, 502, baseCors);
     return res.binary(bytes, response.status, headers);
   } catch (e) {
     error(e?.stack || e?.message || String(e));
-    return res.json({ ok: false, error: e?.message || 'Gateway request failed.' }, 502);
+    return res.json({ ok: false, error: e?.message || 'Gateway request failed.' }, 502, baseCors);
   }
 };
