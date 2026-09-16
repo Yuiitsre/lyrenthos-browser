@@ -1,4 +1,4 @@
-module github.com/Yuiitsre/lyrenthos-browser/services/gateway
+module lyrenthos-gateway
 
 go 1.23
 
