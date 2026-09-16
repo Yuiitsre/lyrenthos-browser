@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
-  "dependencies": {"@appwrite.io/client": "latest", "@vitejs/plugin-react": "latest", "react": "latest", "react-dom": "latest", "vite": "latest", "typescript": "latest"},
-  "devDependencies": {}
+  "dependencies": {"appwrite": "latest", "react": "latest", "react-dom": "latest"},
+  "devDependencies": {"@vitejs/plugin-react": "latest", "typescript": "latest", "vite": "latest"}
 }
