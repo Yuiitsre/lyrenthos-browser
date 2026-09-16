@@ -27,7 +27,7 @@ const (
 )
 
 type sessionStore struct {
-	mu    sync.RWMutex
+	mu    sync.Mutex
 	jars  map[string]http.CookieJar
 	last  map[string]time.Time
 	ttl   time.Duration
@@ -132,7 +132,9 @@ func main() {
 		copyRequestHeaders(upstream.Header, r.Header)
 		upstream.Header.Set("User-Agent", browserUserAgent())
 		upstream.Header.Set("Accept", acceptHeader(r.Header.Get("Accept")))
-		upstream.Header.Set("Accept-Language", r.Header.Get("Accept-Language"))
+		if language := r.Header.Get("Accept-Language"); language != "" {
+			upstream.Header.Set("Accept-Language", language)
+		}
 		upstream.Header.Set("Accept-Encoding", "gzip")
 
 		for _, c := range jar.Cookies(target) {
@@ -368,7 +370,9 @@ func resolveRelative(base *url.URL, value string) string {
 	if resolved.Scheme != "http" && resolved.Scheme != "https" {
 		return ""
 	}
-	if validateTarget(resolved) != nil {
+	// Do not DNS-resolve every asset during HTML rewriting. The dialer performs
+	// the SSRF-safe resolution immediately before the actual network connection.
+	if resolved.Hostname() == "" || strings.ContainsAny(resolved.Hostname(), "\\r\\n") {
 		return ""
 	}
 	return resolved.String()
