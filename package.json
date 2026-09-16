@@ -1,9 +1,9 @@
 {
   "name": "lyrenthos-browser-web",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {"dev":"vite","build":"vite build","preview":"vite preview"},
-  "dependencies": {"@vitejs/plugin-react":"latest","appwrite":"latest","react":"latest","react-dom":"latest","typescript":"latest","vite":"latest"},
+  "dependencies": {"@vitejs/plugin-react":"latest","react":"latest","react-dom":"latest","typescript":"latest","vite":"latest"},
   "devDependencies": {}
 }
