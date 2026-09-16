@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import { account, appwriteConfigured } from './lib/appwrite'
+import { gatewayEnabled, proxyUrl } from './lib/gateway'
 import './styles.css'
 
 type Tab = { id: string; title: string; url: string }
@@ -15,21 +17,21 @@ function normalizeInput(value: string): string {
 }
 
 function App() {
-  const [tabs, setTabs] = useState<Tab[]>([
-    { id: crypto.randomUUID(), title: 'New Tab', url: DEFAULT_URL },
-  ])
-  const [activeId, setActiveId] = useState(tabs[0].id)
+  const first = { id: crypto.randomUUID(), title: 'New Tab', url: DEFAULT_URL }
+  const [tabs, setTabs] = useState<Tab[]>([first])
+  const [activeId, setActiveId] = useState(first.id)
   const [address, setAddress] = useState(DEFAULT_URL)
-  const [status, setStatus] = useState('Ready')
+  const [status, setStatus] = useState(gatewayEnabled() ? 'Gateway configured' : 'Gateway not configured')
 
   const active = useMemo(() => tabs.find(t => t.id === activeId)!, [tabs, activeId])
+  const viewUrl = gatewayEnabled() ? proxyUrl(active.url) : ''
 
   function navigate(value: string) {
     const url = normalizeInput(value)
     setAddress(url)
-    setStatus('Gateway connection pending')
+    setStatus(gatewayEnabled() ? 'Loading through gateway…' : 'Preview mode — configure the gateway')
     setTabs(current => current.map(t => t.id === activeId
-      ? { ...t, url, title: new URL(url).hostname || 'Page' }
+      ? { ...t, url, title: safeTitle(url) }
       : t))
   }
 
@@ -49,6 +51,19 @@ function App() {
       const replacement = next[Math.max(0, index - 1)]
       setActiveId(replacement.id)
       setAddress(replacement.url)
+    }
+  }
+
+  async function loginHint() {
+    if (!appwriteConfigured) {
+      setStatus('Configure Appwrite environment variables first')
+      return
+    }
+    try {
+      const user = await account.get()
+      setStatus(`Signed in as ${user.name || user.email}`)
+    } catch {
+      setStatus('No Appwrite session — add your auth flow next')
     }
   }
 
@@ -79,34 +94,47 @@ function App() {
           <input value={address} onChange={e => setAddress(e.target.value)} aria-label="Address" />
           <button type="submit" className="go">Go</button>
         </form>
-        <button className="icon-btn">⋯</button>
+        <button className="icon-btn" onClick={loginHint}>◎</button>
       </section>
 
       <section className="workspace">
-        <div className="page-card">
-          <div className="hero-orb" />
-          <div className="hero-content">
-            <div className="eyebrow">LYRENTHOS BROWSER</div>
-            <h1>Your web.<br /><span>Your interface.</span></h1>
-            <p>Fast browser gateway architecture with your own UI, persistent sessions, and an optional browser-engine fallback.</p>
-            <div className="actions">
-              <button className="primary" onClick={() => navigate('https://example.com')}>Open a site</button>
-              <button className="secondary" onClick={() => setStatus('Gateway not configured yet')}>Connection status</button>
+        {gatewayEnabled() ? (
+          <iframe
+            title="Lyrenthos web viewport"
+            className="web-viewport"
+            src={viewUrl}
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="page-card">
+            <div className="hero-orb" />
+            <div className="hero-content">
+              <div className="eyebrow">LYRENTHOS BROWSER</div>
+              <h1>Your web.<br /><span>Your interface.</span></h1>
+              <p>The frontend is ready for Appwrite Sites. Set the gateway URL to enable the streaming HTTP browser viewport, then add persistent session and Chromium fallback services.</p>
+              <div className="actions">
+                <button className="primary" onClick={() => navigate('https://example.com')}>Open a site</button>
+                <button className="secondary" onClick={loginHint}>Check Appwrite</button>
+              </div>
             </div>
+            <aside className="session-card">
+              <div className="session-title">SESSION</div>
+              <div className="session-value">{status}</div>
+              <div className="session-row"><span>Render</span><b>Local browser</b></div>
+              <div className="session-row"><span>Transport</span><b>Streaming HTTP</b></div>
+              <div className="session-row"><span>Fallback</span><b>Chromium</b></div>
+            </aside>
           </div>
-          <aside className="session-card">
-            <div className="session-title">SESSION</div>
-            <div className="session-value">{status}</div>
-            <div className="session-row"><span>Render</span><b>Local browser</b></div>
-            <div className="session-row"><span>Transport</span><b>Streaming HTTP</b></div>
-            <div className="session-row"><span>Browser fallback</span><b>Chromium</b></div>
-          </aside>
-        </div>
+        )}
       </section>
 
       <footer className="statusbar"><span>●</span> {status}</footer>
     </main>
   )
+}
+
+function safeTitle(value: string): string {
+  try { return new URL(value).hostname || 'Page' } catch { return 'Page' }
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>)
