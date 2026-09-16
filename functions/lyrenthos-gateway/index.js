@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { Client, Storage, ID, InputFile } from 'node-appwrite';
+import { Client, Storage } from 'node-appwrite';
+import { InputFile } from 'node-appwrite/file';
 
 const BUCKET_ID = 'lyrenthos-browser-sessions';
 const MAX_HTML = 6 * 1024 * 1024;
@@ -8,11 +9,13 @@ const MAX_REQUEST = 2 * 1024 * 1024;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36';
 
-const client = new Client()
-  .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
-  .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
-  .setKey(process.env.APPWRITE_FUNCTION_API_KEY);
-const storage = new Storage(client);
+function getStorage(req) {
+  const client = new Client()
+    .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
+    .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
+    .setKey(req.headers['x-appwrite-key']);
+  return new Storage(client);
+}
 
 function responseHeaders(source) {
   const out = {};
@@ -92,7 +95,7 @@ function parseSetCookie(line, requestUrl) {
     const value = rest.join('=');
     if (key === 'domain' && value) { cookie.domain = value.replace(/^\./, '').toLowerCase(); cookie.hostOnly = false; }
     else if (key === 'path' && value.startsWith('/')) cookie.path = value;
-    else if (key === 'max-age') { const seconds = Number(value); if (Number.isFinite(seconds)) cookie.expires = Date.now() + seconds * 1000; }
+    else if (key === 'max-age') { const seconds = Number(value); if (Number.isFinite(seconds)) cookie.expires = seconds <= 0 ? Date.now() - 1 : Date.now() + seconds * 1000; }
     else if (key === 'expires') { const time = Date.parse(value); if (Number.isFinite(time)) cookie.expires = time; }
     else if (key === 'secure') cookie.secure = true;
   }
@@ -115,15 +118,17 @@ function cookiesFor(url, cookies) {
   return cookies.filter(c => (!c.expires || c.expires > now) && domainMatches(url.hostname, c) && pathMatches(url.pathname || '/', c.path || '/') && (!c.secure || url.protocol === 'https:')).map(c => `${c.name}=${c.value}`).join('; ');
 }
 function mergeCookies(existing, setCookies, requestUrl) {
-  const next = existing.filter(c => !setCookies.some(n => n && n.name === c.name && n.domain === c.domain && n.path === c.path));
+  let next = [...existing];
   for (const line of setCookies) {
     const c = parseSetCookie(line, requestUrl);
-    if (c) next.push(c);
+    if (!c) continue;
+    next = next.filter(old => !(old.name === c.name && old.domain === c.domain && old.path === c.path));
+    if (!c.expires || c.expires > Date.now()) next.push(c);
   }
   return next.filter(c => !c.expires || c.expires > Date.now()).slice(-300);
 }
 
-async function loadSession(sid) {
+async function loadSession(storage, sid) {
   const fileId = sessionFileId(sid);
   try {
     const bytes = await storage.getFileDownload({ bucketId: BUCKET_ID, fileId });
@@ -135,7 +140,7 @@ async function loadSession(sid) {
   }
 }
 
-async function saveSession(sid, fileId, cookies) {
+async function saveSession(storage, sid, fileId, cookies) {
   const payload = Buffer.from(JSON.stringify({ v: 1, sid, updatedAt: Date.now(), cookies }));
   const input = InputFile.fromBuffer(payload, `${fileId}.json`);
   try {
@@ -145,25 +150,26 @@ async function saveSession(sid, fileId, cookies) {
   }
 }
 
-async function ensureBucket() {
-  try { await storage.getBucket({ bucketId: BUCKET_ID }); }
-  catch {
-    try {
-      await storage.createBucket({
-        bucketId: BUCKET_ID,
-        name: 'Lyrenthos Browser Sessions',
-        fileSecurity: false,
-        enabled: true,
-        maximumFileSize: 1024 * 1024,
-        encryption: true,
-        compression: 'gzip',
-        antivirus: false,
-        transformations: false,
-        permissions: [],
-      });
-    } catch (e) {
-      if (e?.code !== 409) throw e;
-    }
+async function ensureBucket(storage) {
+  try {
+    await storage.getBucket({ bucketId: BUCKET_ID });
+    return;
+  } catch {}
+  try {
+    await storage.createBucket({
+      bucketId: BUCKET_ID,
+      name: 'Lyrenthos Browser Sessions',
+      fileSecurity: false,
+      enabled: true,
+      maximumFileSize: 1024 * 1024,
+      encryption: true,
+      compression: 'gzip',
+      antivirus: false,
+      transformations: false,
+      permissions: [],
+    });
+  } catch (e) {
+    if (e?.code !== 409) throw e;
   }
 }
 
@@ -172,7 +178,7 @@ function proxiedUrl(functionOrigin, sid, target) {
 }
 function rewriteUrl(functionOrigin, sid, base, value) {
   const v = value.trim();
-  if (!v || v.startsWith('#') || /^(data:|javascript:|mailto:|tel:|blob:)/i.test(v)) return value;
+  if (!v || v.startsWith('#') || /^(data:|javascript:|mailto:|tel:|blob:|about:)/i.test(v)) return value;
   try {
     const u = new URL(v, base);
     if (!['http:', 'https:'].includes(u.protocol)) return value;
@@ -198,7 +204,7 @@ function rewriteHtml(html, functionOrigin, sid, base) {
   return out;
 }
 
-async function fetchThrough(url, method, headers, body, cookies, context) {
+async function fetchThrough(url, method, headers, body, cookies) {
   let current = url;
   let currentMethod = method;
   let currentBody = body;
@@ -208,7 +214,6 @@ async function fetchThrough(url, method, headers, body, cookies, context) {
     outgoing.set('User-Agent', headers.get('user-agent') || DEFAULT_UA);
     outgoing.set('Accept', headers.get('accept') || '*/*');
     const lang = headers.get('accept-language'); if (lang) outgoing.set('Accept-Language', lang);
-    const referer = headers.get('referer'); if (referer) outgoing.set('Referer', referer);
     const cookieHeader = cookiesFor(current, cookies);
     if (cookieHeader) outgoing.set('Cookie', cookieHeader);
     if (currentBody && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
@@ -216,12 +221,7 @@ async function fetchThrough(url, method, headers, body, cookies, context) {
     }
     const upstream = await fetch(current, { method: currentMethod, headers: outgoing, body: currentBody, redirect: 'manual' });
     const rawSetCookies = typeof upstream.headers.getSetCookie === 'function' ? upstream.headers.getSetCookie() : [];
-    for (const line of rawSetCookies) {
-      const parsed = parseSetCookie(line, current);
-      if (parsed) {
-        cookies = mergeCookies(cookies, [line], current);
-      }
-    }
+    if (rawSetCookies.length) cookies = mergeCookies(cookies, rawSetCookies, current);
     if ([301,302,303,307,308].includes(upstream.status)) {
       const location = upstream.headers.get('location');
       if (!location) return { response: upstream, url: current, cookies };
@@ -236,15 +236,9 @@ async function fetchThrough(url, method, headers, body, cookies, context) {
   throw new Error('Too many redirects');
 }
 
-function baseResponseHeaders(response, extra = {}) {
-  return { ...responseHeaders(response.headers), ...extra };
-}
-
 export default async ({ req, res, error }) => {
   try {
-    if (req.query.health === '1') {
-      return res.json({ ok: true, service: 'lyrenthos-appwrite-gateway' });
-    }
+    if (req.query.health === '1') return res.json({ ok: true, service: 'lyrenthos-appwrite-gateway' });
     const targetRaw = safeString(req.query.url, 8192);
     if (!targetRaw) return res.json({ ok: true, message: 'Lyrenthos gateway', usage: '?url=https://example.com&sid=<session>' });
     const target = validateTarget(targetRaw);
@@ -253,36 +247,41 @@ export default async ({ req, res, error }) => {
     if (!/^[A-Za-z0-9_-]{24,128}$/.test(sid)) return res.json({ ok: false, error: 'Invalid session.' }, 400);
     if (req.bodyText && req.bodyText.length > MAX_REQUEST) return res.json({ ok: false, error: 'Request body too large.' }, 413);
 
-    await ensureBucket();
-    const session = await loadSession(sid);
+    const storage = getStorage(req);
+    await ensureBucket(storage);
+    const session = await loadSession(storage, sid);
     const incomingHeaders = new Headers();
     for (const [key, value] of Object.entries(req.headers || {})) incomingHeaders.set(key, value);
     const body = ['GET', 'HEAD'].includes(req.method) ? undefined : (req.bodyBinary?.length ? Buffer.from(req.bodyBinary) : (req.bodyText || undefined));
 
-    const result = await fetchThrough(target, req.method, incomingHeaders, body, session.cookies, null);
-    await saveSession(sid, session.fileId, result.cookies);
+    const result = await fetchThrough(target, req.method, incomingHeaders, body, session.cookies);
+    await saveSession(storage, sid, session.fileId, result.cookies);
 
     const response = result.response;
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
     const functionOrigin = `${req.scheme || 'https'}://${req.host}`;
-    const headers = baseResponseHeaders(response, {
+    const headers = {
+      ...responseHeaders(response.headers),
       'Cache-Control': contentType.includes('text/html') ? 'no-store' : 'public, max-age=60',
       'X-Lyrenthos-Session': sid,
-      'Vary': 'Accept-Encoding'
-    });
-
+      'Vary': 'Accept-Encoding',
+    };
     const location = response.headers.get('location');
-    if (location) headers['Location'] = proxiedUrl(functionOrigin, sid, new URL(location, result.url).toString());
+    if (location) headers.Location = proxiedUrl(functionOrigin, sid, new URL(location, result.url).toString());
 
     if (req.method === 'HEAD') return res.empty(response.status, headers);
-
     if (contentType.includes('text/html')) {
       const bytes = Buffer.from(await response.arrayBuffer());
       if (bytes.length > MAX_HTML) return res.json({ ok: false, error: 'HTML response too large for this Appwrite-only gateway.' }, 502);
       const text = rewriteHtml(bytes.toString('utf8'), functionOrigin, sid, result.url);
       return res.text(text, response.status, { ...headers, 'Content-Type': 'text/html; charset=utf-8' });
     }
-
+    if (contentType.includes('text/css')) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > MAX_HTML) return res.json({ ok: false, error: 'CSS response too large.' }, 502);
+      const text = rewriteCss(bytes.toString('utf8'), functionOrigin, sid, result.url);
+      return res.text(text, response.status, { ...headers, 'Content-Type': 'text/css; charset=utf-8' });
+    }
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > MAX_BODY) return res.json({ ok: false, error: 'Response too large for this Appwrite-only gateway.' }, 502);
     return res.binary(bytes, response.status, headers);
