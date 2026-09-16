@@ -1,1 +1,1 @@
-web: ./lyrenthos-gateway
+web: sh -c 'LISTEN_ADDR=:$PORT lyrenthos-gateway'
