@@ -4,13 +4,18 @@
     {
       "$id": "lyrenthos-browser",
       "name": "Lyrenthos Browser",
-      "framework": "vite",
       "enabled": true,
+      "logging": true,
+      "framework": "vite",
+      "timeout": 30,
       "installCommand": "npm install",
       "buildCommand": "npm run build",
-      "outputDirectory": "apps/web/dist",
-      "rootDirectory": "apps/web",
-      "adapter": "static"
+      "outputDirectory": "dist",
+      "buildRuntime": "node-22",
+      "adapter": "static",
+      "fallbackFile": "index.html",
+      "path": "apps/web",
+      "deploymentRetention": 7
     }
   ]
 }
