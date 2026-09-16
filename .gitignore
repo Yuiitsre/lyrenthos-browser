@@ -1,0 +1,22 @@
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+
+# Go
+*.exe
+*.test
+*.out
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local Appwrite CLI state
+.appwrite/
