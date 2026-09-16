@@ -1,4 +1,4 @@
-const gatewayBase = (import.meta.env.VITE_GATEWAY_URL ?? '').replace(/\/$/, '')
+const gatewayBase = (import.meta.env.VITE_GATEWAY_URL ?? 'https://lyrenthos-browser.fra.appwrite.run').replace(/\/$/, '')
 const SESSION_KEY = 'lyrenthos-browser-session-v1'
 
 function getSessionId(): string {
@@ -26,8 +26,13 @@ export function proxyUrl(target: string): string {
 export async function gatewayHealth(): Promise<boolean> {
   if (!gatewayBase) return false
   try {
-    const response = await fetch(`${gatewayBase}/?health=1`, { cache: 'no-store' })
-    return response.ok
+    const response = await fetch(`${gatewayBase}/?health=1`, {
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    })
+    if (!response.ok) return false
+    const data = await response.json().catch(() => null) as { ok?: boolean } | null
+    return data?.ok === true
   } catch {
     return false
   }
