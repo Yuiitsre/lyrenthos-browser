@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "sites": [
+    {
+      "$id": "lyrenthos-browser",
+      "name": "Lyrenthos Browser",
+      "framework": "vite",
+      "enabled": true,
+      "installCommand": "npm install",
+      "buildCommand": "npm run build",
+      "outputDirectory": "apps/web/dist",
+      "rootDirectory": "apps/web",
+      "adapter": "static"
+    }
+  ]
+}
