@@ -1,38 +1,82 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { account, appwriteConfigured } from './lib/appwrite'
-import { gatewayEnabled, proxyUrl } from './lib/gateway'
+import { gatewayEnabled, gatewayHealth, proxyUrl } from './lib/gateway'
 import './styles.css'
 
 type Tab = { id: string; title: string; url: string }
 
 const DEFAULT_URL = 'https://example.com/'
+const STORAGE_KEY = 'lyrenthos-browser-state-v1'
 
-function normalizeInput(value: string): string {
+function normalise(value: string): string {
   const v = value.trim()
   if (!v) return DEFAULT_URL
-  if (/^[a-z]+:\/\//i.test(v)) return v
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return v
   if (v.includes(' ') || !v.includes('.')) return `https://www.google.com/search?q=${encodeURIComponent(v)}`
   return `https://${v}`
 }
 
-function App() {
-  const first = { id: crypto.randomUUID(), title: 'New Tab', url: DEFAULT_URL }
-  const [tabs, setTabs] = useState<Tab[]>([first])
-  const [activeId, setActiveId] = useState(first.id)
-  const [address, setAddress] = useState(DEFAULT_URL)
-  const [status, setStatus] = useState(gatewayEnabled() ? 'Gateway configured' : 'Gateway not configured')
+function loadTabs(): Tab[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) throw new Error('missing')
+    const parsed = JSON.parse(raw) as { tabs?: Tab[] }
+    if (Array.isArray(parsed.tabs) && parsed.tabs.length > 0) return parsed.tabs
+  } catch {
+    // Use the default tab below.
+  }
+  return [{ id: crypto.randomUUID(), title: 'New Tab', url: DEFAULT_URL }]
+}
 
-  const active = useMemo(() => tabs.find(t => t.id === activeId)!, [tabs, activeId])
-  const viewUrl = gatewayEnabled() ? proxyUrl(active.url) : ''
+function App() {
+  const [tabs, setTabs] = useState<Tab[]>(loadTabs)
+  const [activeId, setActiveId] = useState(() => loadTabs()[0]?.id ?? '')
+  const [address, setAddress] = useState(DEFAULT_URL)
+  const [signedIn, setSignedIn] = useState(false)
+  const [health, setHealth] = useState<'unknown' | 'online' | 'offline'>('unknown')
+
+  const active = useMemo(() => tabs.find(tab => tab.id === activeId) ?? tabs[0], [tabs, activeId])
+
+  useEffect(() => {
+    if (active) setAddress(active.url)
+  }, [active?.id])
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs }))
+  }, [tabs])
+
+  useEffect(() => {
+    let alive = true
+    const check = async () => {
+      if (!gatewayEnabled()) {
+        if (alive) setHealth('offline')
+        return
+      }
+      const ok = await gatewayHealth()
+      if (alive) setHealth(ok ? 'online' : 'offline')
+    }
+    void check()
+    const timer = window.setInterval(check, 30_000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    if (!appwriteConfigured) return
+    account.get().then(() => alive && setSignedIn(true)).catch(() => alive && setSignedIn(false))
+    return () => { alive = false }
+  }, [])
 
   function navigate(value: string) {
-    const url = normalizeInput(value)
+    const url = normalise(value)
     setAddress(url)
-    setStatus(gatewayEnabled() ? 'Loading through gateway…' : 'Preview mode — configure the gateway')
-    setTabs(current => current.map(t => t.id === activeId
-      ? { ...t, url, title: safeTitle(url) }
-      : t))
+    setTabs(current => current.map(tab => tab.id === active.id
+      ? { ...tab, url, title: new URL(url).hostname }
+      : tab))
   }
 
   function addTab() {
@@ -54,87 +98,82 @@ function App() {
     }
   }
 
-  async function loginHint() {
-    if (!appwriteConfigured) {
-      setStatus('Configure Appwrite environment variables first')
-      return
-    }
-    try {
-      const user = await account.get()
-      setStatus(`Signed in as ${user.name || user.email}`)
-    } catch {
-      setStatus('No Appwrite session — add your auth flow next')
-    }
-  }
+  const frameUrl = gatewayEnabled() ? proxyUrl(active?.url ?? DEFAULT_URL) : ''
+  const canEmbed = Boolean(frameUrl)
 
   return (
     <main className="app-shell">
-      <header className="chrome">
-        <div className="brand">LYRENTHOS</div>
-        <div className="window-actions"><span>–</span><span>□</span><span>×</span></div>
+      <header className="topbar">
+        <div className="brand-mark"><span className="brand-glyph">L</span><span>LYRENTHOS</span></div>
+        <div className="topbar-right">
+          <span className={`signal ${health}`}><i />{health === 'online' ? 'Gateway online' : health === 'offline' ? 'Gateway offline' : 'Checking'}</span>
+          <span className="session-pill"><span className={signedIn ? 'dot live' : 'dot'} />{signedIn ? 'Account' : 'Local mode'}</span>
+        </div>
       </header>
 
       <nav className="tabs" aria-label="Browser tabs">
         {tabs.map(tab => (
           <button key={tab.id} className={`tab ${tab.id === activeId ? 'active' : ''}`} onClick={() => { setActiveId(tab.id); setAddress(tab.url) }}>
-            <span className="tab-dot" />
+            <span className="tab-icon" />
             <span className="tab-title">{tab.title}</span>
-            {tabs.length > 1 && <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}>×</span>}
+            {tabs.length > 1 && <span className="tab-close" onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}>×</span>}
           </button>
         ))}
-        <button className="new-tab" onClick={addTab}>+</button>
+        <button className="new-tab" onClick={addTab} aria-label="New tab">+</button>
       </nav>
 
       <section className="toolbar">
-        <button className="icon-btn" aria-label="Back">←</button>
-        <button className="icon-btn" aria-label="Forward">→</button>
-        <button className="icon-btn" aria-label="Reload" onClick={() => navigate(active.url)}>↻</button>
-        <form className="address-form" onSubmit={e => { e.preventDefault(); navigate(address) }}>
-          <span className="lock">⌁</span>
-          <input value={address} onChange={e => setAddress(e.target.value)} aria-label="Address" />
-          <button type="submit" className="go">Go</button>
+        <button className="nav-btn" onClick={() => history.back()} aria-label="Back">←</button>
+        <button className="nav-btn" onClick={() => history.forward()} aria-label="Forward">→</button>
+        <button className="nav-btn" onClick={() => navigate(active.url)} aria-label="Reload">↻</button>
+        <form className="address-shell" onSubmit={event => { event.preventDefault(); navigate(address) }}>
+          <span className="shield">⌁</span>
+          <input value={address} onChange={event => setAddress(event.target.value)} aria-label="Address" spellCheck={false} />
+          <button className="go-btn" type="submit">Go</button>
         </form>
-        <button className="icon-btn" onClick={loginHint}>◎</button>
+        <button className="nav-btn" aria-label="Menu">⋯</button>
       </section>
 
-      <section className="workspace">
-        {gatewayEnabled() ? (
+      <section className="viewport">
+        {canEmbed ? (
           <iframe
             title="Lyrenthos web viewport"
-            className="web-viewport"
-            src={viewUrl}
+            className="site-frame"
+            src={frameUrl}
             referrerPolicy="no-referrer"
           />
         ) : (
-          <div className="page-card">
-            <div className="hero-orb" />
-            <div className="hero-content">
-              <div className="eyebrow">LYRENTHOS BROWSER</div>
-              <h1>Your web.<br /><span>Your interface.</span></h1>
-              <p>The frontend is ready for Appwrite Sites. Set the gateway URL to enable the streaming HTTP browser viewport, then add persistent session and Chromium fallback services.</p>
-              <div className="actions">
-                <button className="primary" onClick={() => navigate('https://example.com')}>Open a site</button>
-                <button className="secondary" onClick={loginHint}>Check Appwrite</button>
+          <div className="welcome">
+            <div className="orb" />
+            <div className="welcome-copy">
+              <div className="eyebrow">PERSONAL WEB GATEWAY</div>
+              <h1>Fast web access.<br /><em>Your interface.</em></h1>
+              <p>Enter a public website above. The production gateway streams resources directly to your browser instead of sending a remote desktop video feed.</p>
+              <div className="quick-actions">
+                <button className="primary" onClick={() => navigate('https://example.com')}>Open example.com</button>
+                <button className="secondary" onClick={() => setAddress('https://example.com/')}>Set address</button>
               </div>
             </div>
-            <aside className="session-card">
-              <div className="session-title">SESSION</div>
-              <div className="session-value">{status}</div>
-              <div className="session-row"><span>Render</span><b>Local browser</b></div>
-              <div className="session-row"><span>Transport</span><b>Streaming HTTP</b></div>
-              <div className="session-row"><span>Fallback</span><b>Chromium</b></div>
-            </aside>
+            <div className="architecture-card">
+              <div className="card-kicker">CURRENT MODE</div>
+              <div className="mode">{gatewayEnabled() ? 'Gateway configured' : 'Gateway not configured'}</div>
+              <div className="metric"><span>Render</span><strong>Local browser</strong></div>
+              <div className="metric"><span>Transport</span><strong>HTTP streaming</strong></div>
+              <div className="metric"><span>Fallback</span><strong>Chromium</strong></div>
+              <div className="hint">{gatewayEnabled() ? 'Gateway is configured. If this panel remains visible, open a target URL.' : 'Add VITE_GATEWAY_URL in the Appwrite Site environment variables.'}</div>
+            </div>
           </div>
         )}
       </section>
 
-      <footer className="statusbar"><span>●</span> {status}</footer>
+      <footer className="statusbar">
+        <span className="status-dot" />
+        <span>{gatewayEnabled() ? (health === 'online' ? 'Secure gateway connected' : 'Gateway unavailable') : 'Frontend ready · gateway not configured'}</span>
+        <span className="status-spacer" />
+        <span>Appwrite {appwriteConfigured ? 'configured' : 'not configured'}</span>
+      </footer>
     </main>
   )
-}
-
-function safeTitle(value: string): string {
-  try { return new URL(value).hostname || 'Page' } catch { return 'Page' }
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>)
